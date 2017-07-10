@@ -7,14 +7,14 @@ import time
 import os
 
 class TFModel(object) :
-'''
-    super class
-'''
+    '''
+        super class
+    '''
     def __init__(self, sess, epochs, batch_size, is_training, learning_rate, model_name, checkpoint_dir, sum_dir) :
-    '''
-        @param sess : tensorflow session
-        @param sum_dir : summary directory
-    '''
+        '''
+            @param sess : tensorflow session
+            @param sum_dir : summary directory
+        '''
         self.sess = sess
         self.epochs = epochs
         self.batch_size = batch_size
@@ -23,12 +23,11 @@ class TFModel(object) :
         self.sum_dir = sum_dir
         self.is_training = is_training
         self.model_name = model_name
-        self.saver = tf.train.Saver()
 
     def build_model(self) :
-    '''
-        build modle, should be rewrite
-    '''
+        '''
+            build modle, should be rewrite
+        '''
         # inputs
         self.x = None
         # labels
@@ -39,31 +38,30 @@ class TFModel(object) :
         self.loss = None
 
     def train(self) :
-    '''
-        train process, should be rewrite
-    '''
+        '''
+            train process, should be rewrite
+        '''
         self.train_op = None
 
     def predict(self) :
-    '''
-        predict
-    '''
+        '''
+            predict
+        '''
         pass
 
-
     def sigmoid_accuracy(self) :
-    '''
-        accuracy calculate
-        tf.nn.sigmoid_cross_entropy_with_logits
-    '''
+        '''
+            accuracy calculate
+            tf.nn.sigmoid_cross_entropy_with_logits
+        '''
         correct_prediction = tf.equal(tf.cast(tf.round(tf.sigmoid(self.logits)), tf.int32), tf.cast(self.y, tf.int32))
         return tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
 
     def softmax_accuracy(self) :
-    '''
-        accuracy calculate
-        tf.losses.softmax_cross_entropy
-    '''
+        '''
+            accuracy calculate
+            tf.losses.softmax_cross_entropy
+        '''
         correct_prediction = tf.equal(tf.argmax(self.logits,1), tf.argmax(self.y,1))
         return tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
 
@@ -98,3 +96,13 @@ class TFModel(object) :
         import tensorflow.contrib.slim as slim
         model_vars = tf.trainable_variables()
         slim.model_analyzer.analyze_vars(model_vars, print_info=True)
+
+if __name__ == '__main__' :
+    flags = tf.app.flags
+    flags.DEFINE_integer("batch_size", 32, "The size of batch images [32]")
+    flags.DEFINE_integer("epoch", 10, "Epoch to train [10]")
+    flags.DEFINE_float("learning_rate", 0.01, "Learning rate [0.01]")
+    flags.DEFINE_string("checkpoint_dir", "./model/mnist", "Directory name to save the checkpoints [./model/mnist]")
+    flags.DEFINE_string("sum_dir", "./summary/mist", "Directory name to save the summarys [./summary/mnist]")
+    flags.DEFINE_boolean("is_training", False, "True for training, False for testing [False]")
+    FLAGS = flags.FLAGS
