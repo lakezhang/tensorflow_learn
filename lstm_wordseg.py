@@ -55,7 +55,54 @@ class RNNModel(TFModel2) :
         # N S B M E
         self.y_class = 5
         #build model
-        self.build_model()
+        self.build_bi_model()
+
+    def build_bi_model(self) :
+        self.x = tf.placeholder(tf.int32, [None, self.num_steps])
+        self.y = tf.placeholder(tf.int32, [None, self.num_steps])
+
+        W = tf.get_variable("embedding_weights", [self.vocabulary_size, self.embedding_dims], dtype=tf.float32)
+        input_embedded = tf.nn.embedding_lookup(W, self.x)
+
+        if self.is_training and self.dropout > 0.0 :
+            input_embedded = tf.nn.dropout(input_embedded, keep_prob = 1- self.dropout)
+
+        lstm_cell = lambda : tf.contrib.rnn.BasicLSTMCell(self.rnn_units,
+            forget_bias=0.0, state_is_tuple=True, reuse=tf.get_variable_scope().reuse)
+
+        drop_cell = lstm_cell
+        if self.is_training and self.dropout > 0.0 :
+            drop_cell = lambda : tf.contrib.rnn.DropoutWrapper(lstm_cell(), output_keep_prob = 1 - self.dropout)
+
+        cells_fw = tf.contrib.rnn.MultiRNNCell([drop_cell() for _ in range(self.rnn_layers_num)], state_is_tuple=True)
+        self.init_state_fw = cells_fw.zero_state(self.batch_size, tf.float32)
+
+        cells_bw = tf.contrib.rnn.MultiRNNCell([drop_cell() for _ in range(self.rnn_layers_num)], state_is_tuple=True)
+        self.init_state_bw = cells_bw.zero_state(self.batch_size, tf.float32)
+
+        #input_embedded :  (self.batch_size, self.num_steps, self.embedding_dims)
+        #rnn_output: (self.batch_size, self.num_steps, self.rnn_units)
+        rnn_output, state = tf.nn.bidirectional_dynamic_rnn(cells_fw, cells_bw, input_embedded, time_major=False, initial_state_fw=self.init_state_fw, initial_state_bw=self.init_state_bw)
+        #get the last step of the rnn_output
+        #output = tf.unstack(tf.transpose(rnn_output, [1, 0, 2]))
+        output = tf.concat(rnn_output, 2)
+        output = tf.reshape(output, [-1, self.rnn_units * 2])
+        dense1 = tf.layers.dense(inputs=output, units=self.y_class, name='logits',activation=None, reuse=tf.get_variable_scope().reuse)
+        self.logits = tf.reshape(dense1, [self.batch_size, self.num_steps, self.y_class])
+        self.loss = tf.reduce_mean(tf.contrib.seq2seq.sequence_loss(
+            self.logits, self.y,
+            tf.ones([self.batch_size, self.num_steps], dtype=tf.float32),
+            average_across_timesteps=False, average_across_batch=True))
+
+        if self.is_training :
+            self.global_step = tf.Variable(0, name='global_step', trainable=False)
+            tvars = tf.trainable_variables()
+            grads, _ = tf.clip_by_global_norm(tf.gradients(self.loss, tvars), self.max_grad_norm)
+            optimizer = tf.train.RMSPropOptimizer(self.learning_rate)
+            self.train_op = optimizer.apply_gradients(zip(grads, tvars), global_step=self.global_step)
+            #self.train_op = tf.train.RMSPropOptimizer(self.learning_rate).minimize(self.loss, global_step=self.global_step)
+
+        self.saver = tf.train.Saver()
 
     def build_model(self) :
         self.x = tf.placeholder(tf.int32, [None, self.num_steps])
@@ -121,9 +168,9 @@ class WordSeg(object) :
         self.model_name = model_name
         self.num_steps = num_steps
         self.vocabulary_size = vocabulary_size
-        print self.vocabulary_size
+        # prepare data
         self.prepare_data()
-        print self.vocabulary_size
+        self.test_batch = 200
 
         initializer = tf.random_uniform_initializer(-1.0, 1.0)
         if is_training :
@@ -132,16 +179,17 @@ class WordSeg(object) :
                     self.train_model = RNNModel(self.sess, batch_size, True, learning_rate, model_name, checkpoint_dir,
                                 num_steps, dropout, rnn_units, rnn_layers_num, embedding_dims, self.vocabulary_size, max_grad_norm)
                     self.train_model.show_all_variables()
-        '''
+
             with tf.name_scope("Test"):
                 with tf.variable_scope("Model", reuse=True, initializer=initializer) :
-                    self.test_model = RNNModel(self.sess, 1, False, learning_rate, model_name, checkpoint_dir,
-                                num_steps, dropout, rnn_units, rnn_layers_num, embedding_dims, vocabulary_size, max_grad_norm)
+                    self.test_model = RNNModel(self.sess, self.test_batch, False, learning_rate, model_name, checkpoint_dir,
+                                num_steps, dropout, rnn_units, rnn_layers_num, embedding_dims, self.vocabulary_size, max_grad_norm)
 
+        '''
         else :
             with tf.variable_scope("Model", reuse=None, initializer=initializer) :
                 self.preidct_model = RNNModel(self.sess, 1, False, learning_rate, model_name, checkpoint_dir,
-                            num_steps, dropout, rnn_units, rnn_layers_num, embedding_dims, vocabulary_size, max_grad_norm)
+                            num_steps, dropout, rnn_units, rnn_layers_num, embedding_dims, self.vocabulary_size, max_grad_norm)
         '''
 
     def split_tokens(self, tokens) :
@@ -182,11 +230,30 @@ class WordSeg(object) :
             for j, cid in enumerate(self.x_train[i]) :
                 print '%d:%s:%d' % (cid, self.idchar[cid], self.y_train[i][j])
 
-    def prepare_data(self) :
-        input_file = './data/icwb2/training/pku_training.utf8'
-        #padding 用
-        vocab = set([chr(0),])
-        input_lines = []
+    def show_result(self, x, logits, num=3, y=None) :
+        labels = ['N', 'S', 'B', 'M', 'E']
+        p = np.argmax(logits, 2)
+
+        for i, v in enumerate(x) :
+            o1 = []
+            o2 = []
+            for j, t in enumerate(v) :
+                o1.append(self.idchar.get(t, chr(1)))
+                if y is not None and y[i][j] in (1, 4) :
+                    o1.append(' | ')
+                o2.append(self.idchar.get(t, chr(1)))
+                if p[i][j] in (1, 4) :
+                    o2.append(' | ')
+
+            print ''.join(o1)
+            print ''.join(o2)
+
+            if i >= num -1 :
+                break
+
+    def build_vocab(self, input_file) :
+        #chr(0) : PADDING  chr(1) : OOV
+        vocab = set([chr(0),chr(1)])
         with open(input_file) as fp :
             for line in fp :
                 line = line.strip().decode('utf-8')
@@ -198,10 +265,12 @@ class WordSeg(object) :
         self.idchar = dict((i, c) for i, c in enumerate(vocab))
         self.charid = dict((c, i) for i, c in enumerate(vocab))
         self.vocabulary_size = len(vocab)
-        self.x_train = []
-        self.y_train = []
 
-        count = 0
+    def build_data(self, input_file) :
+        oov_id = self.charid[chr(1)]
+        data_x = []
+        data_y = []
+
         with open(input_file) as fp :
             for line in fp :
                 line = line.strip().decode('utf-8')
@@ -219,25 +288,35 @@ class WordSeg(object) :
                             break
 
                         if len(t) == 1 :
-                            one_x.append(self.charid[t])
+                            one_x.append(self.charid.get(t, oov_id))
                             one_y.append(1) # SINGLE
                         elif len(t) > 1 :
-                            one_x.append(self.charid[t[0]])
+                            one_x.append(self.charid.get(t[0], oov_id))
                             one_y.append(2) # BEGIN
 
-                            for i, j in enumerate(t[1:-1]) :
-                                one_x.append(self.charid[j])
+                            for o in t[1:-1] :
+                                one_x.append(self.charid.get(o, oov_id))
                                 one_y.append(3) # MIDDLE
 
-                            one_x.append(self.charid[t[-1]])
+                            one_x.append(self.charid.get(t[-1], oov_id))
                             one_y.append(4) # END
 
-                    self.x_train.append(one_x)
-                    self.y_train.append(one_y)
+                    data_x.append(one_x)
+                    data_y.append(one_y)
 
-        self.x_train = sequence.pad_sequences(self.x_train, maxlen=self.num_steps, value=self.charid[chr(0)])
+        data_x = sequence.pad_sequences(data_x, maxlen=self.num_steps, value=self.charid[chr(0)])
         # 0 : PADDING
-        self.y_train = sequence.pad_sequences(self.y_train, maxlen=self.num_steps, value=0)
+        data_y = sequence.pad_sequences(data_y, maxlen=self.num_steps, value=0)
+
+        return data_x, data_y
+
+    def prepare_data(self) :
+        train_file = './data/icwb2/training/pku_training.utf8'
+        test_file = './data/icwb2/gold/pku_test_gold.utf8'
+
+        self.build_vocab(train_file)
+        self.x_train, self.y_train = self.build_data(train_file)
+        self.x_test, self.y_test = self.build_data(test_file)
 
     def train(self) :
         x_train = self.x_train
@@ -263,8 +342,16 @@ class WordSeg(object) :
                     summary_writer.flush()
                     print('EPOCH: %d Step %d: loss = %.4f accuracy = %.4f (%.3f sec)' % (i, step, loss, accuracy, duration))
 
-            #loss, accuracy = self.sess.run([self.test_model.loss, self.test_model.evaluate()], feed_dict={self.test_model.x : x_test , self.test_model.y : y_test})
-            #print('EPOCH: %d TEST loss = %.4f accuracy = %.4f' % (i, loss, accuracy))
+            test_sample = np.arange(len(self.x_test))
+            np.random.shuffle(test_sample)
+            test_sample = test_sample[:self.test_batch]
+
+            x_test = self.x_test[test_sample, :]
+            y_test = self.y_test[test_sample, :]
+
+            loss, logits, accuracy = self.sess.run([self.test_model.loss, self.test_model.logits, self.test_model.evaluate()], feed_dict={self.test_model.x : x_test , self.test_model.y : y_test})
+            print('EPOCH: %d TEST loss = %.4f accuracy = %.4f' % (i, loss, accuracy))
+            self.show_result(x_test, logits, 3, y_test)
 
             self.train_model.save(i)
 
@@ -292,8 +379,8 @@ if __name__ == '__main__' :
             num_steps=32,
             dropout=0.2,
             rnn_units=64,
-            rnn_layers_num=1,
-            max_grad_norm=6
+            rnn_layers_num=2,
+            max_grad_norm=6.0
             )
 
         #obj.show_sample(3)
